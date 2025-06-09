@@ -121,7 +121,7 @@ text_encoder.eval()
 transformer.eval()
 
 transformer.to(dtype=torch.float16)
-text_encoder.to(dtype=torch.float16)
+text_encoder.to(dtype=torch.bfloat16)
 
 text_encoder.requires_grad_(False)
 transformer.requires_grad_(False)
@@ -273,6 +273,8 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         # Text encoding
         emit_progress('Encoding text prompt...', 8)
         conditional_dict = text_encoder(text_prompts=[prompt])
+        for key, value in conditional_dict.items():
+            conditional_dict[key] = value.to(dtype=torch.float16)
         if low_memory:
             gpu_memory_preservation = get_cuda_free_memory_gb(gpu) + 5
             move_model_to_device_with_memory_preservation(
