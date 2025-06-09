@@ -11,13 +11,9 @@ easydict
 ftfy
 dashscope
 imageio-ffmpeg
-gradio==5.23.0
 numpy==1.24.4
-boto3
-decord
 wandb
 omegaconf
-moviepy==1.0.3
 einops
 av==13.1.0
 opencv-python
@@ -37,7 +33,6 @@ nvidia-tensorrt
 pycuda
 onnx
 onnxruntime
-fastapi
 onnxscript
 onnxconverter_common
 flask
