@@ -37,7 +37,7 @@ nvidia-tensorrt
 pycuda
 onnx
 onnxruntime
-fastapi==0.112.4
+fastapi
 onnxscript
 onnxconverter_common
 flask
