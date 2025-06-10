@@ -15,7 +15,7 @@
     <a href="https://research.adobe.com/person/eli-shechtman/">Eli Shechtman</a><sup>1</sup><br>
     <sup>1</sup>Adobe Research <sup>2</sup>UT Austin
   </p>
-  <h3 align="center"><a href="https://self-forcing.github.io/static/self_forcing.pdf">Paper</a> | <a href="https://self-forcing.github.io">Website</a> | <a href="https://huggingface.co/gdhe17/Self-Forcing/tree/main">Models (HuggingFace)</a></h3>
+  <h3 align="center"><a href="https://arxiv.org/abs/2506.08009">Paper</a> | <a href="https://self-forcing.github.io">Website</a> | <a href="https://huggingface.co/gdhe17/Self-Forcing/tree/main">Models (HuggingFace)</a></h3>
 </p>
 
 ---
@@ -98,4 +98,12 @@ Our training run uses 600 iterations and completes in under 2 hours using 64 H10
 This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid) by [Tianwei Yin](https://tianweiy.github.io/) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo.
 
 ## Citation
-To be added.
+If you find this codebase useful for your research, please kindly cite our paper:
+```
+@article{huang2025selfforcing,
+  title={Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion},
+  author={Huang, Xun and Li, Zhengqi and He, Guande and Zhou, Mingyuan and Shechtman, Eli},
+  journal={arXiv preprint arXiv:2506.08009},
+  year={2025}
+}
+```
