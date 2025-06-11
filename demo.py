@@ -3,6 +3,7 @@ Demo for Self-Forcing.
 """
 
 import os
+import random
 import time
 import base64
 import argparse
@@ -23,6 +24,12 @@ from demo_utils.vae_block3 import VAEDecoderWrapper
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
 from demo_utils.utils import generate_timestamp
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller, move_model_to_device_with_memory_preservation
+
+# New imports
+import hashlib
+import re
+import os
+import subprocess
 
 # Parse arguments
 parser = argparse.ArgumentParser()
@@ -48,7 +55,10 @@ current_vae_decoder = None
 current_use_taehv = False
 fp8_applied = False
 torch_compile_applied = False
-
+global frame_number
+frame_number = 0
+anim_name = ""
+frame_rate = 6
 
 def initialize_vae_decoder(use_taehv=False, use_trt=False):
     """Initialize VAE decoder based on the selected option"""
@@ -154,6 +164,7 @@ models_compiled = False
 
 def tensor_to_base64_frame(frame_tensor):
     """Convert a single frame tensor to base64 image string."""
+    global frame_number, anim_name
     # Clamp and normalize to 0-255
     frame = torch.clamp(frame_tensor.float(), -1., 1.) * 127.5 + 127.5
     frame = frame.to(torch.uint8).cpu().numpy()
@@ -170,7 +181,11 @@ def tensor_to_base64_frame(frame_tensor):
 
     # Convert to base64
     buffer = BytesIO()
-    image.save(buffer, format='JPEG', quality=85)
+    image.save(buffer, format='JPEG', quality=100)
+    if not os.path.exists("./images/%s" % anim_name):
+        os.makedirs("./images/%s" % anim_name)
+    frame_number += 1
+    image.save("./images/%s/%s_%03d.jpg" % (anim_name, anim_name, frame_number))
     img_str = base64.b64encode(buffer.getvalue()).decode()
     return f"data:image/jpeg;base64,{img_str}"
 
@@ -229,7 +244,7 @@ def frame_sender_worker():
 @torch.no_grad()
 def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=False, use_taehv=False):
     """Generate video and push frames immediately to frontend."""
-    global generation_active, stop_event, frame_send_queue, sender_thread, models_compiled, torch_compile_applied, fp8_applied, current_vae_decoder, current_use_taehv
+    global generation_active, stop_event, frame_send_queue, sender_thread, models_compiled, torch_compile_applied, fp8_applied, current_vae_decoder, current_use_taehv, frame_rate, anim_name
 
     try:
         generation_active = True
@@ -278,7 +293,7 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         if low_memory:
             gpu_memory_preservation = get_cuda_free_memory_gb(gpu) + 5
             move_model_to_device_with_memory_preservation(
-                text_encoder, target_device=gpu, preserved_memory_gb=gpu_memory_preservation)
+                text_encoder,target_device=gpu, preserved_memory_gb=gpu_memory_preservation)
 
         # Handle torch.compile if enabled
         torch_compile_applied = enable_torch_compile
@@ -460,6 +475,7 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         frame_send_queue.join()  # Wait for all queued frames to be processed
         print("✅ All frames sent successfully!")
 
+        generate_mp4_from_images("./images","./videos/"+anim_name+".mp4", frame_rate )
         # Final progress update
         emit_progress('Generation complete!', 100)
 
@@ -492,9 +508,40 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         except Exception as e:
             print(f"❌ Failed to put None in frame_send_queue: {e}")
 
+
+def generate_mp4_from_images(image_directory, output_video_path, fps=24):
+    """
+    Generate an MP4 video from a directory of images ordered alphabetically.
+
+    :param image_directory: Path to the directory containing images.
+    :param output_video_path: Path where the output MP4 will be saved.
+    :param fps: Frames per second for the output video.
+    """
+    global anim_name
+    # Construct the ffmpeg command
+    cmd = [
+        'ffmpeg',
+        '-framerate', str(fps),
+        '-i', os.path.join(image_directory, anim_name+'/'+anim_name+'_%03d.jpg'),  # Adjust the pattern if necessary
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        output_video_path
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Video saved to {output_video_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+
+def calculate_sha256(data):
+    # Convert data to bytes if it's not already
+    if isinstance(data, str):
+        data = data.encode()
+    # Calculate SHA-256 hash
+    sha256_hash = hashlib.sha256(data).hexdigest()
+    return sha256_hash
+
 # Socket.IO event handlers
-
-
 @socketio.on('connect')
 def handle_connect():
     print('Client connected')
@@ -508,17 +555,36 @@ def handle_disconnect():
 
 @socketio.on('start_generation')
 def handle_start_generation(data):
-    global generation_active
+    global generation_active, frame_number, anim_name, frame_rate
 
+    frame_number = 0
     if generation_active:
         emit('error', {'message': 'Generation already in progress'})
         return
 
     prompt = data.get('prompt', '')
-    seed = data.get('seed', 31337)
+
+    seed = data.get('seed', -1)
+    if seed==-1:
+        seed = random.randint(0, 2**32)
+
+    # Extract words up to the first punctuation or newline
+    words_up_to_punctuation = re.split(r'[^\w\s]', prompt)[0].strip() if prompt else ''
+    if not words_up_to_punctuation:
+        words_up_to_punctuation = re.split(r'[\n\r]', prompt)[0].strip()
+
+    # Calculate SHA-256 hash of the entire prompt
+    sha256_hash = calculate_sha256(prompt)
+
+    # Create anim_name with the extracted words and first 10 characters of the hash
+    anim_name = f"{words_up_to_punctuation[:20]}_{str(seed)}_{sha256_hash[:10]}"
+
+    generation_active = True
+    generation_start_time = time.time()
     enable_torch_compile = data.get('enable_torch_compile', False)
     enable_fp8 = data.get('enable_fp8', False)
     use_taehv = data.get('use_taehv', False)
+    frame_rate = data.get('fps', 6)
 
     if not prompt:
         emit('error', {'message': 'Prompt is required'})
