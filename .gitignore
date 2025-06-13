@@ -1,8 +1,5 @@
 __pycache__
 *.egg-info
 
-images/
-videos/
-
 wan_models
 checkpoints
