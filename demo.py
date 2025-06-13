@@ -3,10 +3,13 @@ Demo for Self-Forcing.
 """
 
 import os
+import re
 import random
 import time
 import base64
 import argparse
+import hashlib
+import subprocess
 import urllib.request
 from io import BytesIO
 from PIL import Image
@@ -24,12 +27,6 @@ from demo_utils.vae_block3 import VAEDecoderWrapper
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
 from demo_utils.utils import generate_timestamp
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller, move_model_to_device_with_memory_preservation
-
-# New imports
-import hashlib
-import re
-import os
-import subprocess
 
 # Parse arguments
 parser = argparse.ArgumentParser()
