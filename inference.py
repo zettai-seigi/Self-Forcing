@@ -12,10 +12,12 @@ from torch.utils.data.distributed import DistributedSampler
 
 from pipeline import (
     CausalDiffusionInferencePipeline,
-    CausalInferencePipeline
+    CausalInferencePipeline,
 )
 from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
+
+from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, help="Path to the config file")
@@ -47,6 +49,9 @@ else:
     world_size = 1
     set_seed(args.seed)
 
+print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
+low_memory = get_cuda_free_memory_gb(gpu) < 40
+
 torch.set_grad_enabled(False)
 
 config = OmegaConf.load(args.config_path)
@@ -65,7 +70,12 @@ if args.checkpoint_path:
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
     pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'])
 
-pipeline = pipeline.to(device=device, dtype=torch.bfloat16)
+pipeline = pipeline.to(dtype=torch.bfloat16)
+if low_memory:
+    DynamicSwapInstaller.install_model(pipeline.text_encoder, device=gpu)
+pipeline.generator.to(device=gpu)
+pipeline.vae.to(device=gpu)
+
 
 # Create dataset
 if args.i2v:
@@ -156,6 +166,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         text_prompts=prompts,
         return_latents=True,
         initial_latent=initial_latent,
+        low_memory=low_memory,
     )
     current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
     all_video.append(current_video)
