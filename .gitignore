@@ -1,5 +1,36 @@
-__pycache__
+# Python standard
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 *.egg-info
+build/
+dist/
 
-wan_models
-checkpoints
+# Local models and checkpoints
+wan_models/
+checkpoints/
+
+# Environment
+.envrc
+
+# IDE / Editor / Tool specific
+.cache/
+.cursorindexingignore
+.specstory/
+.ipynb_checkpoints/
+.requirements_installed
+
+# User specific docs
+CLAUDE.md
+
+# Generated media
+# Ignore all content in images and videos directories
+images/*
+videos/*
+# But don't ignore .gitkeep files, so empty directories can be tracked
+!images/.gitkeep
+!videos/.gitkeep
+
+# Logs
+*.log
