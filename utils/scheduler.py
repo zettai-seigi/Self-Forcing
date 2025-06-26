@@ -1,5 +1,6 @@
 from abc import abstractmethod, ABC
 import torch
+from utils.device import is_mps
 
 
 class SchedulerInterface(ABC):
@@ -35,10 +36,15 @@ class SchedulerInterface(ABC):
 
         noise = (xt-sqrt(alpha_t)*x0) / sqrt(beta_t) (eq 11 in https://arxiv.org/abs/2311.18828)
         """
-        # use higher precision for calculations
+        # use higher precision for calculations (float32 for MPS compatibility)
         original_dtype = x0.dtype
+        # Ensure original_dtype is MPS-compatible
+        if is_mps() and original_dtype == torch.float64:
+            original_dtype = torch.float32
+        # Use float32 instead of double for MPS compatibility
+        precision_dtype = torch.float32 if is_mps() else torch.float64
         x0, xt, alphas_cumprod = map(
-            lambda x: x.double().to(x0.device), [x0, xt,
+            lambda x: x.to(dtype=precision_dtype, device=x0.device), [x0, xt,
                                                  self.alphas_cumprod]
         )
 
@@ -61,10 +67,15 @@ class SchedulerInterface(ABC):
 
         x0 = (x_t - sqrt(beta_t) * noise) / sqrt(alpha_t) (eq 11 in https://arxiv.org/abs/2311.18828)
         """
-        # use higher precision for calculations
+        # use higher precision for calculations (float32 for MPS compatibility)
         original_dtype = noise.dtype
+        # Ensure original_dtype is MPS-compatible
+        if is_mps() and original_dtype == torch.float64:
+            original_dtype = torch.float32
+        # Use float32 instead of double for MPS compatibility
+        precision_dtype = torch.float32 if is_mps() else torch.float64
         noise, xt, alphas_cumprod = map(
-            lambda x: x.double().to(noise.device), [noise, xt,
+            lambda x: x.to(dtype=precision_dtype, device=noise.device), [noise, xt,
                                                     self.alphas_cumprod]
         )
         alpha_prod_t = alphas_cumprod[timestep].reshape(-1, 1, 1, 1)
@@ -90,10 +101,15 @@ class SchedulerInterface(ABC):
         x0 = sqrt(alpha_t) * x_t - sqrt(beta_t) * v
         see derivations https://chatgpt.com/share/679fb6c8-3a30-8008-9b0e-d1ae892dac56
         """
-        # use higher precision for calculations
+        # use higher precision for calculations (float32 for MPS compatibility)
         original_dtype = velocity.dtype
+        # Ensure original_dtype is MPS-compatible
+        if is_mps() and original_dtype == torch.float64:
+            original_dtype = torch.float32
+        # Use float32 instead of double for MPS compatibility
+        precision_dtype = torch.float32 if is_mps() else torch.float64
         velocity, xt, alphas_cumprod = map(
-            lambda x: x.double().to(velocity.device), [velocity, xt,
+            lambda x: x.to(dtype=precision_dtype, device=velocity.device), [velocity, xt,
                                                        self.alphas_cumprod]
         )
         alpha_prod_t = alphas_cumprod[timestep].reshape(-1, 1, 1, 1)
@@ -118,19 +134,21 @@ class FlowMatchScheduler():
     def set_timesteps(self, num_inference_steps=100, denoising_strength=1.0, training=False):
         sigma_start = self.sigma_min + \
             (self.sigma_max - self.sigma_min) * denoising_strength
+        # Force float32 for MPS compatibility
+        dtype = torch.float32
         if self.extra_one_step:
             self.sigmas = torch.linspace(
-                sigma_start, self.sigma_min, num_inference_steps + 1)[:-1]
+                sigma_start, self.sigma_min, num_inference_steps + 1, dtype=dtype)[:-1]
         else:
             self.sigmas = torch.linspace(
-                sigma_start, self.sigma_min, num_inference_steps)
+                sigma_start, self.sigma_min, num_inference_steps, dtype=dtype)
         if self.inverse_timesteps:
             self.sigmas = torch.flip(self.sigmas, dims=[0])
         self.sigmas = self.shift * self.sigmas / \
             (1 + (self.shift - 1) * self.sigmas)
         if self.reverse_sigmas:
             self.sigmas = 1 - self.sigmas
-        self.timesteps = self.sigmas * self.num_train_timesteps
+        self.timesteps = (self.sigmas * self.num_train_timesteps).to(dtype)
         if training:
             x = self.timesteps
             y = torch.exp(-2 * ((x - num_inference_steps / 2) /
@@ -138,7 +156,7 @@ class FlowMatchScheduler():
             y_shifted = y - y.min()
             bsmntw_weighing = y_shifted * \
                 (num_inference_steps / y_shifted.sum())
-            self.linear_timesteps_weights = bsmntw_weighing
+            self.linear_timesteps_weights = bsmntw_weighing.to(dtype)
 
     def step(self, model_output, timestep, sample, to_final=False):
         if timestep.ndim == 2:

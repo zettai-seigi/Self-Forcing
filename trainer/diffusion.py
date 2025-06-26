@@ -12,6 +12,7 @@ import time
 import os
 
 from utils.distributed import EMA_FSDP, barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job
+from utils.device import get_device, get_current_device, configure_device_settings, is_mps, ensure_float32
 
 
 class Trainer:
@@ -20,14 +21,21 @@ class Trainer:
         self.step = 0
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
+        configure_device_settings()
+        
         launch_distributed_job()
-        global_rank = dist.get_rank()
+        if dist.is_initialized():
+            global_rank = dist.get_rank()
+        else:
+            global_rank = 0
 
-        self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
-        self.device = torch.cuda.current_device()
+        # Use float32 for MPS compatibility
+        if is_mps():
+            self.dtype = torch.float32
+        else:
+            self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
+        
+        self.device = get_current_device()
         self.is_main_process = global_rank == 0
         self.causal = config.causal
         self.disable_wandb = config.disable_wandb

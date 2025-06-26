@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .tokenizers import HuggingfaceTokenizer
+from utils.device import get_device
 
 __all__ = [
     'T5Model',
@@ -59,11 +60,17 @@ class T5LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
+        from utils.device import is_mps
         x = x * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) +
                             self.eps)
-        if self.weight.dtype in [torch.float16, torch.bfloat16]:
-            x = x.type_as(self.weight)
-        return self.weight * x
+        # Ensure consistent dtype for MPS compatibility
+        if is_mps():
+            x = x.float()
+            return self.weight.float() * x
+        else:
+            if self.weight.dtype in [torch.float16, torch.bfloat16]:
+                x = x.type_as(self.weight)
+            return self.weight * x
 
 
 class T5Attention(nn.Module):
@@ -474,15 +481,16 @@ class T5EncoderModel:
     def __init__(
         self,
         text_len,
-        dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        dtype=torch.float32,
+        device=None,
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
     ):
         self.text_len = text_len
         self.dtype = dtype
-        self.device = device
+        # Set device to auto-detected device if not provided
+        self.device = device if device is not None else get_device()
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
 
@@ -491,7 +499,7 @@ class T5EncoderModel:
             encoder_only=True,
             return_tokenizer=False,
             dtype=dtype,
-            device=device).eval().requires_grad_(False)
+            device=self.device).eval().requires_grad_(False)
         logging.info(f'loading {checkpoint_path}')
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
         self.model = model

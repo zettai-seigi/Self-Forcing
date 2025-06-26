@@ -16,6 +16,7 @@ from pipeline import (
 )
 from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
+from utils.device import get_device, get_device_with_id, set_device, configure_device_settings, is_mps, is_cuda
 
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
 
@@ -35,19 +36,30 @@ parser.add_argument("--save_with_index", action="store_true",
                     help="Whether to save the video using the index or prompt as the filename")
 args = parser.parse_args()
 
-# Initialize distributed inference
-if "LOCAL_RANK" in os.environ:
+# Initialize distributed inference with MPS/CUDA compatibility
+if "LOCAL_RANK" in os.environ and is_cuda():
+    # Only use distributed training with CUDA
     dist.init_process_group(backend='nccl')
     local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    set_device(local_rank)
+    device = get_device_with_id(local_rank)
     world_size = dist.get_world_size()
     set_seed(args.seed + local_rank)
-else:
-    device = torch.device("cuda")
+elif "LOCAL_RANK" in os.environ and is_mps():
+    # MPS doesn't support distributed training well, fall back to single device
+    print("Warning: Distributed training not fully supported on MPS. Using single device.")
+    device = get_device()
     local_rank = 0
     world_size = 1
     set_seed(args.seed)
+else:
+    device = get_device()
+    local_rank = 0
+    world_size = 1
+    set_seed(args.seed)
+
+# Configure device-specific settings
+configure_device_settings()
 
 print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
 low_memory = get_cuda_free_memory_gb(gpu) < 40
@@ -70,7 +82,11 @@ if args.checkpoint_path:
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
     pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'])
 
-pipeline = pipeline.to(dtype=torch.bfloat16)
+# Use appropriate dtype based on device
+if is_mps():
+    pipeline = pipeline.to(dtype=torch.float32)
+else:
+    pipeline = pipeline.to(dtype=torch.bfloat16)
 if low_memory:
     DynamicSwapInstaller.install_model(pipeline.text_encoder, device=gpu)
 pipeline.generator.to(device=gpu)
@@ -137,14 +153,16 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         prompts = [prompt] * args.num_samples
 
         # Process the image
-        image = batch['image'].squeeze(0).unsqueeze(0).unsqueeze(2).to(device=device, dtype=torch.bfloat16)
+        # Use appropriate dtype based on device
+        dtype = torch.float32 if is_mps() else torch.bfloat16
+        image = batch['image'].squeeze(0).unsqueeze(0).unsqueeze(2).to(device=device, dtype=dtype)
 
         # Encode the input image as the first latent
-        initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=torch.bfloat16)
+        initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=dtype)
         initial_latent = initial_latent.repeat(args.num_samples, 1, 1, 1, 1)
 
         sampled_noise = torch.randn(
-            [args.num_samples, args.num_output_frames - 1, 16, 60, 104], device=device, dtype=torch.bfloat16
+            [args.num_samples, args.num_output_frames - 1, 16, 60, 104], device=device, dtype=dtype
         )
     else:
         # For text-to-video, batch is just the text prompt
@@ -157,7 +175,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         initial_latent = None
 
         sampled_noise = torch.randn(
-            [args.num_samples, args.num_output_frames, 16, 60, 104], device=device, dtype=torch.bfloat16
+            [args.num_samples, args.num_output_frames, 16, 60, 104], device=device, dtype=dtype
         )
 
     # Generate 81 frames

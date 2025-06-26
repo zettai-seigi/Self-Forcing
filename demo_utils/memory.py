@@ -1,12 +1,14 @@
 # Copied from https://github.com/lllyasviel/FramePack/tree/main/demo_utils
 # Apache-2.0 License
 # By lllyasviel
+# Modified for MPS/CUDA compatibility
 
 import torch
+from utils.device import get_device, get_memory_info, get_memory_stats, empty_cache, is_mps, is_cuda
 
 
 cpu = torch.device('cpu')
-gpu = torch.device(f'cuda:{torch.cuda.current_device()}')
+gpu = get_device()  # Use device abstraction
 gpu_complete_modules = []
 
 
@@ -70,16 +72,30 @@ def fake_diffusers_current_device(model: torch.nn.Module, target_device: torch.d
 
 
 def get_cuda_free_memory_gb(device=None):
+    """Get free memory in GB - works for both CUDA and MPS."""
     if device is None:
         device = gpu
-
-    memory_stats = torch.cuda.memory_stats(device)
-    bytes_active = memory_stats['active_bytes.all.current']
-    bytes_reserved = memory_stats['reserved_bytes.all.current']
-    bytes_free_cuda, _ = torch.cuda.mem_get_info(device)
-    bytes_inactive_reserved = bytes_reserved - bytes_active
-    bytes_total_available = bytes_free_cuda + bytes_inactive_reserved
-    return bytes_total_available / (1024 ** 3)
+    
+    if is_cuda():
+        # Use CUDA-specific memory functions
+        memory_stats = torch.cuda.memory_stats(device)
+        bytes_active = memory_stats['active_bytes.all.current']
+        bytes_reserved = memory_stats['reserved_bytes.all.current']
+        bytes_free_cuda, _ = torch.cuda.mem_get_info(device)
+        bytes_inactive_reserved = bytes_reserved - bytes_active
+        bytes_total_available = bytes_free_cuda + bytes_inactive_reserved
+        return bytes_total_available / (1024 ** 3)
+    elif is_mps():
+        # Use MPS-compatible memory estimation
+        try:
+            bytes_free, bytes_total = get_memory_info()
+            return bytes_free / (1024 ** 3)
+        except:
+            # Fallback to conservative estimate for MPS
+            return 16.0  # Conservative 16GB estimate for MPS
+    else:
+        # CPU fallback
+        return 64.0  # Conservative CPU memory estimate
 
 
 def move_model_to_device_with_memory_preservation(model, target_device, preserved_memory_gb=0):
@@ -87,14 +103,14 @@ def move_model_to_device_with_memory_preservation(model, target_device, preserve
 
     for m in model.modules():
         if get_cuda_free_memory_gb(target_device) <= preserved_memory_gb:
-            torch.cuda.empty_cache()
+            empty_cache()
             return
 
         if hasattr(m, 'weight'):
             m.to(device=target_device)
 
     model.to(device=target_device)
-    torch.cuda.empty_cache()
+    empty_cache()
     return
 
 
@@ -103,14 +119,14 @@ def offload_model_from_device_for_memory_preservation(model, target_device, pres
 
     for m in model.modules():
         if get_cuda_free_memory_gb(target_device) >= preserved_memory_gb:
-            torch.cuda.empty_cache()
+            empty_cache()
             return
 
         if hasattr(m, 'weight'):
             m.to(device=cpu)
 
     model.to(device=cpu)
-    torch.cuda.empty_cache()
+    empty_cache()
     return
 
 
@@ -120,7 +136,7 @@ def unload_complete_models(*args):
         print(f'Unloaded {m.__class__.__name__} as complete.')
 
     gpu_complete_modules.clear()
-    torch.cuda.empty_cache()
+    empty_cache()
     return
 
 

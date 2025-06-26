@@ -2,6 +2,7 @@ from typing import List, Optional
 import torch
 
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
+from utils.device import create_event, synchronize, is_mps
 
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller, move_model_to_device_with_memory_preservation
 
@@ -95,17 +96,17 @@ class CausalInferencePipeline(torch.nn.Module):
             dtype=noise.dtype
         )
 
-        # Set up profiling if requested
+        # Set up profiling if requested (MPS/CUDA compatible)
         if profile:
-            init_start = torch.cuda.Event(enable_timing=True)
-            init_end = torch.cuda.Event(enable_timing=True)
-            diffusion_start = torch.cuda.Event(enable_timing=True)
-            diffusion_end = torch.cuda.Event(enable_timing=True)
-            vae_start = torch.cuda.Event(enable_timing=True)
-            vae_end = torch.cuda.Event(enable_timing=True)
+            init_start = create_event(enable_timing=True)
+            init_end = create_event(enable_timing=True)
+            diffusion_start = create_event(enable_timing=True)
+            diffusion_end = create_event(enable_timing=True)
+            vae_start = create_event(enable_timing=True)
+            vae_end = create_event(enable_timing=True)
             block_times = []
-            block_start = torch.cuda.Event(enable_timing=True)
-            block_end = torch.cuda.Event(enable_timing=True)
+            block_start = create_event(enable_timing=True)
+            block_end = create_event(enable_timing=True)
             init_start.record()
 
         # Step 1: Initialize KV cache to all zeros
@@ -169,8 +170,8 @@ class CausalInferencePipeline(torch.nn.Module):
                 current_start_frame += self.num_frame_per_block
 
         if profile:
-            init_end.record()
-            torch.cuda.synchronize()
+            init_end.record_end()
+            synchronize()
             diffusion_start.record()
 
         # Step 3: Temporal denoising loop
@@ -235,8 +236,8 @@ class CausalInferencePipeline(torch.nn.Module):
             )
 
             if profile:
-                block_end.record()
-                torch.cuda.synchronize()
+                block_end.record_end()
+                synchronize()
                 block_time = block_start.elapsed_time(block_end)
                 block_times.append(block_time)
 
@@ -244,8 +245,8 @@ class CausalInferencePipeline(torch.nn.Module):
             current_start_frame += current_num_frames
 
         if profile:
-            # End diffusion timing and synchronize CUDA
-            diffusion_end.record()
+            # End diffusion timing and synchronize device
+            diffusion_end.record_end()
             torch.cuda.synchronize()
             diffusion_time = diffusion_start.elapsed_time(diffusion_end)
             init_time = init_start.elapsed_time(init_end)

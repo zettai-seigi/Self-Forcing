@@ -20,11 +20,19 @@ import torch.distributed as dist
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
 # change to default for other models
-flex_attention = torch.compile(
-    flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
+# Use MPS-compatible compilation mode
+if torch.backends.mps.is_available():
+    # MPS doesn't support max-autotune modes well, use default
+    flex_attention = torch.compile(flex_attention, dynamic=False)
+else:
+    flex_attention = torch.compile(
+        flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
 
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
+    # Use float32 for MPS compatibility
+    from utils.device import is_mps
+    dtype = torch.float32 if is_mps() else torch.float64
     n, c = x.size(2), x.size(3) // 2
 
     # split freqs
@@ -37,7 +45,7 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
         seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
+        x_i = torch.view_as_complex(x[i, :seq_len].to(dtype).reshape(
             seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][start_frame:start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
