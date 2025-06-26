@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from utils.scheduler import SchedulerInterface, FlowMatchScheduler
+from utils.device import get_device, is_mps
 from wan.modules.tokenizers import HuggingfaceTokenizer
 from wan.modules.model import WanModel, RegisterTokens, GanAttentionBlock
 from wan.modules.vae import _video_vae
@@ -21,18 +22,34 @@ class WanTextEncoder(torch.nn.Module):
             dtype=torch.float32,
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
-        self.text_encoder.load_state_dict(
-            torch.load("wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth",
-                       map_location='cpu', weights_only=False)
-        )
+        # Load state dict with proper dtype conversion for MPS compatibility
+        state_dict = torch.load("wan_models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth",
+                               map_location='cpu', weights_only=False)
+        
+        # Convert all parameters to float32 for MPS compatibility
+        if is_mps():
+            for key in state_dict:
+                if isinstance(state_dict[key], torch.Tensor):
+                    state_dict[key] = state_dict[key].float()
+        
+        self.text_encoder.load_state_dict(state_dict)
+        
+        # Ensure consistent dtype conversion and device placement
+        if is_mps():
+            self.text_encoder = self.text_encoder.float()
+            # Deep conversion of all parameters and buffers
+            from utils.device import convert_model_to_float32
+            self.text_encoder = convert_model_to_float32(self.text_encoder)
+            # Move to MPS device after conversion
+            self.text_encoder = self.text_encoder.to(get_device())
 
         self.tokenizer = HuggingfaceTokenizer(
             name="wan_models/Wan2.1-T2V-1.3B/google/umt5-xxl/", seq_len=512, clean='whitespace')
 
     @property
     def device(self):
-        # Assume we are always on GPU
-        return torch.cuda.current_device()
+        # Use device abstraction for MPS/CUDA compatibility
+        return next(self.text_encoder.parameters()).device
 
     def forward(self, text_prompts: List[str]) -> dict:
         ids, mask = self.tokenizer(
@@ -129,6 +146,12 @@ class WanDiffusionWrapper(torch.nn.Module):
         else:
             self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
         self.model.eval()
+        
+        # Ensure consistent dtype for MPS compatibility
+        if is_mps():
+            self.model = self.model.float()
+            from utils.device import convert_model_to_float32
+            self.model = convert_model_to_float32(self.model)
 
         # For non-causal diffusion, all frames share the same timestep
         self.uniform_timestep = not is_causal
@@ -178,10 +201,15 @@ class WanDiffusionWrapper(torch.nn.Module):
         we have x0 = x_t - sigma_t * pred
         see derivations https://chatgpt.com/share/67bf8589-3d04-8008-bc6e-4cf1a24e2d0e
         """
-        # use higher precision for calculations
+        # use higher precision for calculations (float32 for MPS compatibility)
         original_dtype = flow_pred.dtype
+        # Ensure original_dtype is MPS-compatible
+        if is_mps() and original_dtype == torch.float64:
+            original_dtype = torch.float32
+        # Use float32 instead of double for MPS compatibility
+        precision_dtype = torch.float32 if is_mps() else torch.float64
         flow_pred, xt, sigmas, timesteps = map(
-            lambda x: x.double().to(flow_pred.device), [flow_pred, xt,
+            lambda x: x.to(dtype=precision_dtype, device=flow_pred.device), [flow_pred, xt,
                                                         self.scheduler.sigmas,
                                                         self.scheduler.timesteps]
         )
@@ -190,7 +218,11 @@ class WanDiffusionWrapper(torch.nn.Module):
             (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
         sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
         x0_pred = xt - sigma_t * flow_pred
-        return x0_pred.to(original_dtype)
+        result = x0_pred.to(original_dtype)
+        # Ensure MPS compatibility
+        if is_mps() and result.dtype == torch.float64:
+            result = result.float()
+        return result
 
     @staticmethod
     def _convert_x0_to_flow_pred(scheduler, x0_pred: torch.Tensor, xt: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
@@ -202,10 +234,15 @@ class WanDiffusionWrapper(torch.nn.Module):
 
         pred = (x_t - x_0) / sigma_t
         """
-        # use higher precision for calculations
+        # use higher precision for calculations (float32 for MPS compatibility)
         original_dtype = x0_pred.dtype
+        # Ensure original_dtype is MPS-compatible
+        if is_mps() and original_dtype == torch.float64:
+            original_dtype = torch.float32
+        # Use float32 instead of double for MPS compatibility
+        precision_dtype = torch.float32 if is_mps() else torch.float64
         x0_pred, xt, sigmas, timesteps = map(
-            lambda x: x.double().to(x0_pred.device), [x0_pred, xt,
+            lambda x: x.to(dtype=precision_dtype, device=x0_pred.device), [x0_pred, xt,
                                                       scheduler.sigmas,
                                                       scheduler.timesteps]
         )
@@ -213,7 +250,11 @@ class WanDiffusionWrapper(torch.nn.Module):
             (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
         sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
         flow_pred = (xt - x0_pred) / sigma_t
-        return flow_pred.to(original_dtype)
+        result = flow_pred.to(original_dtype)
+        # Ensure MPS compatibility
+        if is_mps() and result.dtype == torch.float64:
+            result = result.float()
+        return result
 
     def forward(
         self,

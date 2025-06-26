@@ -15,6 +15,7 @@ import torch
 import wandb
 import time
 import os
+from utils.device import get_device, get_current_device, configure_device_settings, is_mps, ensure_float32, empty_cache
 
 
 class Trainer:
@@ -23,15 +24,23 @@ class Trainer:
         self.step = 0
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
+        configure_device_settings()
+        
         launch_distributed_job()
-        global_rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
+        if dist.is_initialized():
+            global_rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+        else:
+            global_rank = 0
+            self.world_size = 1
 
-        self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
-        self.device = torch.cuda.current_device()
+        # Use float32 for MPS compatibility
+        if is_mps():
+            self.dtype = torch.float32
+        else:
+            self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
+        
+        self.device = get_current_device()
         self.is_main_process = global_rank == 0
         self.causal = config.causal
         self.disable_wandb = config.disable_wandb
@@ -210,7 +219,7 @@ class Trainer:
         self.model.eval()  # prevent any randomness (e.g. dropout)
 
         if self.step % 20 == 0:
-            torch.cuda.empty_cache()
+            empty_cache()
 
         # Step 1: Get the next batch of text prompts
         text_prompts = batch["prompts"]
@@ -282,21 +291,21 @@ class Trainer:
     def generate_video(self, pipeline, prompts, image=None):
         batch_size = len(prompts)
         if image is not None:
-            image = image.squeeze(0).unsqueeze(0).unsqueeze(2).to(device="cuda", dtype=torch.bfloat16)
+            image = image.squeeze(0).unsqueeze(0).unsqueeze(2).to(device=self.device, dtype=self.dtype)
 
             # Encode the input image as the first latent
-            initial_latent = pipeline.vae.encode_to_latent(image).to(device="cuda", dtype=torch.bfloat16)
+            initial_latent = pipeline.vae.encode_to_latent(image).to(device=self.device, dtype=self.dtype)
             initial_latent = initial_latent.repeat(batch_size, 1, 1, 1, 1)
             sampled_noise = torch.randn(
                 [batch_size, self.model.num_training_frames - 1, 16, 60, 104],
-                device="cuda",
+                device=self.device,
                 dtype=self.dtype
             )
         else:
             initial_latent = None
             sampled_noise = torch.randn(
                 [batch_size, self.model.num_training_frames, 16, 60, 104],
-                device="cuda",
+                device=self.device,
                 dtype=self.dtype
             )
 
@@ -346,9 +355,9 @@ class Trainer:
 
             # Save the model
             if (not self.config.no_save) and (self.step - start_step) > 0 and self.step % self.config.log_iters == 0:
-                torch.cuda.empty_cache()
+                empty_cache()
                 self.save()
-                torch.cuda.empty_cache()
+                empty_cache()
 
             # Logging
             if self.is_main_process:
@@ -376,7 +385,7 @@ class Trainer:
                 if dist.get_rank() == 0:
                     logging.info("DistGarbageCollector: Running GC.")
                 gc.collect()
-                torch.cuda.empty_cache()
+                empty_cache()
 
             if self.is_main_process:
                 current_time = time.time()

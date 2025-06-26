@@ -107,3 +107,31 @@ If you find this codebase useful for your research, please kindly cite our paper
   year={2025}
 }
 ```
+
+## Recent Updates (for upcoming PR)
+
+The primary theme of these updates is to add support for MPS (Apple's Metal Performance Shaders), enabling the model to run on Apple Silicon Macs, while also introducing more robust and device-agnostic code.
+
+*   **Core Training (`trainer/`)**:
+    *   The training scripts (`diffusion.py`, `distillation.py`) now use a new `device` utility to automatically detect and configure for CUDA or MPS.
+    *   Data types are set to `torch.float32` when running on MPS to ensure compatibility, as `bfloat16` is not fully supported.
+    *   Distributed training setup now gracefully handles non-CUDA environments, allowing single-device training on MPS.
+
+*   **Distributed Utilities (`utils/distributed.py`)**:
+    *   Fully Sharded Data Parallel (FSDP) is now conditionally applied, with warnings for MPS since it is not supported. This prevents crashes when not on a CUDA-based distributed setup.
+    *   The distributed backend can be automatically selected (`nccl` for CUDA, `gloo` for others).
+
+*   **Scheduling (`utils/scheduler.py`)**:
+    *   Calculations within the schedulers now use `torch.float32` on MPS to avoid precision-related errors, ensuring compatibility with Apple Silicon.
+
+*   **Model Wrappers (`utils/wan_wrapper.py`)**:
+    *   The model and tokenizer loading logic now explicitly handles device placement and data types for MPS.
+    *   Calculations for converting predictions (`x0` to flow) have been updated to use `torch.float32` on MPS to maintain precision and avoid errors.
+
+*   **WAN Modules (`wan/modules/`)**:
+    *   **Attention (`attention.py`)**: Flash Attention has been replaced with a standard PyTorch attention mechanism that is fully compatible with MPS, ensuring the model can run without a discrete NVIDIA GPU.
+    *   **Causal Model (`causal_model.py`)**: The model's rotational position embeddings (RoPE) and attention mechanisms have been updated to use `float32` on MPS.
+    *   **T5 (`t5.py`)**: The T5 text encoder model now dynamically sets its device and data types, allowing it to function correctly on both CUDA and MPS.
+
+*   **Inference Pipelines (`wan/text2video.py`, `wan/image2video.py`)**:
+    *   Device-specific `torch.cuda.synchronize()` calls have been replaced with a device-agnostic approach that works for both CUDA and MPS.

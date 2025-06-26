@@ -27,6 +27,7 @@ from demo_utils.vae_block3 import VAEDecoderWrapper
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
 from demo_utils.utils import generate_timestamp
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller, move_model_to_device_with_memory_preservation
+from utils.device import get_device, configure_device_settings, is_mps, ensure_float32, convert_model_to_float32
 
 # Parse arguments
 parser = argparse.ArgumentParser()
@@ -37,8 +38,17 @@ parser.add_argument("--config_path", type=str, default='./configs/self_forcing_d
 parser.add_argument('--trt', action='store_true')
 args = parser.parse_args()
 
-print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
-low_memory = get_cuda_free_memory_gb(gpu) < 40
+# Configure device settings for MPS/CUDA compatibility
+configure_device_settings()
+device = get_device()
+print(f'Using device: {device}')
+
+if is_mps():
+    print('Running on Apple Silicon MPS - using conservative memory settings')
+    low_memory = True  # Always use low memory mode for MPS
+else:
+    print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
+    low_memory = get_cuda_free_memory_gb(gpu) < 40
 
 # Load models
 config = OmegaConf.load(args.config_path)
@@ -62,9 +72,13 @@ def initialize_vae_decoder(use_taehv=False, use_trt=False):
     global current_vae_decoder, current_use_taehv
 
     if use_trt:
-        from demo_utils.vae import VAETRTWrapper
-        current_vae_decoder = VAETRTWrapper()
-        return current_vae_decoder
+        if is_mps():
+            print("Warning: TensorRT is not supported on MPS. Falling back to default VAE.")
+            use_trt = False
+        else:
+            from demo_utils.vae import VAETRTWrapper
+            current_vae_decoder = VAETRTWrapper()
+            return current_vae_decoder
 
     if use_taehv:
         from demo_utils.taehv import TAEHV
@@ -108,9 +122,15 @@ def initialize_vae_decoder(use_taehv=False, use_trt=False):
         current_vae_decoder.load_state_dict(decoder_state_dict)
 
     current_vae_decoder.eval()
-    current_vae_decoder.to(dtype=torch.float16)
+    # Use float32 for MPS compatibility, float16 for CUDA
+    if is_mps():
+        current_vae_decoder.to(dtype=torch.float32)
+        # Ensure all VAE components are consistently float32
+        current_vae_decoder = convert_model_to_float32(current_vae_decoder)
+    else:
+        current_vae_decoder.to(dtype=torch.float16)
     current_vae_decoder.requires_grad_(False)
-    current_vae_decoder.to(gpu)
+    current_vae_decoder.to(device)
     current_use_taehv = use_taehv
 
     print(f"✅ VAE decoder initialized with {'TAEHV' if use_taehv else 'default VAE'}")
@@ -127,25 +147,33 @@ transformer.load_state_dict(state_dict['generator_ema'])
 text_encoder.eval()
 transformer.eval()
 
-transformer.to(dtype=torch.float16)
-text_encoder.to(dtype=torch.bfloat16)
+# Use float32 for MPS compatibility
+if is_mps():
+    transformer.to(dtype=torch.float32)
+    text_encoder.to(dtype=torch.float32)
+    # Ensure all model components are consistently float32
+    transformer = convert_model_to_float32(transformer)
+    text_encoder = convert_model_to_float32(text_encoder)
+else:
+    transformer.to(dtype=torch.float16)
+    text_encoder.to(dtype=torch.bfloat16)
 
 text_encoder.requires_grad_(False)
 transformer.requires_grad_(False)
 
 pipeline = CausalInferencePipeline(
     config,
-    device=gpu,
+    device=device,
     generator=transformer,
     text_encoder=text_encoder,
     vae=vae_decoder
 )
 
 if low_memory:
-    DynamicSwapInstaller.install_model(text_encoder, device=gpu)
+    DynamicSwapInstaller.install_model(text_encoder, device=device)
 else:
-    text_encoder.to(gpu)
-transformer.to(gpu)
+    text_encoder.to(device)
+transformer.to(device)
 
 # Flask and SocketIO setup
 app = Flask(__name__)
@@ -285,31 +313,48 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         # Text encoding
         emit_progress('Encoding text prompt...', 8)
         conditional_dict = text_encoder(text_prompts=[prompt])
-        for key, value in conditional_dict.items():
-            conditional_dict[key] = value.to(dtype=torch.float16)
+        # Use device-appropriate dtype
+        if is_mps():
+            # Keep as float32 for MPS compatibility
+            for key, value in conditional_dict.items():
+                conditional_dict[key] = value.float()
+        else:
+            # Convert to float16 for CUDA
+            for key, value in conditional_dict.items():
+                conditional_dict[key] = value.to(dtype=torch.float16)
         if low_memory:
-            gpu_memory_preservation = get_cuda_free_memory_gb(gpu) + 5
+            gpu_memory_preservation = get_cuda_free_memory_gb(device) + 5
             move_model_to_device_with_memory_preservation(
-                text_encoder,target_device=gpu, preserved_memory_gb=gpu_memory_preservation)
+                text_encoder,target_device=device, preserved_memory_gb=gpu_memory_preservation)
 
         # Handle torch.compile if enabled
         torch_compile_applied = enable_torch_compile
         if enable_torch_compile and not models_compiled:
-            # Compile transformer and decoder
-            transformer.compile(mode="max-autotune-no-cudagraphs")
-            if not current_use_taehv and not low_memory and not args.trt:
-                current_vae_decoder.compile(mode="max-autotune-no-cudagraphs")
+            # Compile transformer and decoder with device-appropriate settings
+            if is_mps():
+                # Use basic compilation for MPS
+                transformer.compile()
+                if not current_use_taehv and not low_memory and not args.trt:
+                    current_vae_decoder.compile()
+            else:
+                # Use advanced compilation for CUDA
+                transformer.compile(mode="max-autotune-no-cudagraphs")
+                if not current_use_taehv and not low_memory and not args.trt:
+                    current_vae_decoder.compile(mode="max-autotune-no-cudagraphs")
 
         # Initialize generation
         emit_progress('Initializing generation...', 12)
 
-        rnd = torch.Generator(gpu).manual_seed(seed)
+        rnd = torch.Generator(device).manual_seed(seed)
         # all_latents = torch.zeros([1, 21, 16, 60, 104], device=gpu, dtype=torch.bfloat16)
 
-        pipeline._initialize_kv_cache(batch_size=1, dtype=torch.float16, device=gpu)
-        pipeline._initialize_crossattn_cache(batch_size=1, dtype=torch.float16, device=gpu)
+        # Use appropriate dtype for device compatibility
+        generation_dtype = torch.float32 if is_mps() else torch.float16
+        
+        pipeline._initialize_kv_cache(batch_size=1, dtype=generation_dtype, device=device)
+        pipeline._initialize_crossattn_cache(batch_size=1, dtype=generation_dtype, device=device)
 
-        noise = torch.randn([1, 21, 16, 60, 104], device=gpu, dtype=torch.float16, generator=rnd)
+        noise = torch.randn([1, 21, 16, 60, 104], device=device, dtype=generation_dtype, generator=rnd)
 
         # Generation parameters
         num_blocks = 7
@@ -409,9 +454,19 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
             if args.trt:
                 all_current_pixels = []
                 for i in range(denoised_pred.shape[1]):
-                    is_first_frame = torch.tensor(1.0).cuda().half() if idx == 0 and i == 0 else \
-                        torch.tensor(0.0).cuda().half()
-                    outputs = vae_decoder.forward(denoised_pred[:, i:i + 1, :, :, :].half(), is_first_frame, *vae_cache)
+                    # Use appropriate dtype for device compatibility
+                    if is_mps():
+                        is_first_frame = torch.tensor(1.0, device=device, dtype=torch.float32) if idx == 0 and i == 0 else \
+                            torch.tensor(0.0, device=device, dtype=torch.float32)
+                    else:
+                        is_first_frame = torch.tensor(1.0).cuda().half() if idx == 0 and i == 0 else \
+                            torch.tensor(0.0).cuda().half()
+                    # Use appropriate dtype for device compatibility
+                    if is_mps():
+                        vae_input = denoised_pred[:, i:i + 1, :, :, :].float()
+                    else:
+                        vae_input = denoised_pred[:, i:i + 1, :, :, :].half()
+                    outputs = vae_decoder.forward(vae_input, is_first_frame, *vae_cache)
                     # outputs = vae_decoder.forward(denoised_pred.float(), *vae_cache)
                     current_pixels, vae_cache = outputs[0], outputs[1:]
                     print(current_pixels.max(), current_pixels.min())
@@ -435,7 +490,12 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
                         pixels = pixels[:, 12:, :, :, :]
 
                 else:
-                    pixels, vae_cache = current_vae_decoder(denoised_pred.half(), *vae_cache)
+                    # Use appropriate dtype for device compatibility
+                    if is_mps():
+                        vae_input = denoised_pred.float()
+                    else:
+                        vae_input = denoised_pred.half()
+                    pixels, vae_cache = current_vae_decoder(vae_input, *vae_cache)
                     if idx == 0:
                         pixels = pixels[:, 3:, :, :, :]  # Skip first 3 frames of first block
 

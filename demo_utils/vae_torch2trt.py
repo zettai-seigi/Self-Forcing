@@ -1,3 +1,5 @@
+# WARNING: This file is NOT compatible with MPS - TensorRT is NVIDIA-only
+# This file is disabled for MPS compatibility
 # ---- INT8 (optional) ----
 from demo_utils.vae import (
     VAEDecoderWrapperSingle,                         # main nn.Module

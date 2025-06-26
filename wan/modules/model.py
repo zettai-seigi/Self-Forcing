@@ -16,7 +16,10 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    # Use float32 for MPS compatibility
+    from utils.device import is_mps
+    dtype = torch.float32 if is_mps() else torch.float64
+    position = position.type(dtype)
 
     # calculation
     sinusoid = torch.outer(
@@ -27,17 +30,23 @@ def sinusoidal_embedding_1d(dim, position):
 
 # @amp.autocast(enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
+    # Use float32 for MPS compatibility
+    from utils.device import is_mps
+    dtype = torch.float32 if is_mps() else torch.float64
     assert dim % 2 == 0
     freqs = torch.outer(
         torch.arange(max_seq_len),
         1.0 / torch.pow(theta,
-                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+                        torch.arange(0, dim, 2).to(dtype).div(dim)))
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
 
 # @amp.autocast(enabled=False)
 def rope_apply(x, grid_sizes, freqs):
+    # Use float32 for MPS compatibility
+    from utils.device import is_mps
+    dtype = torch.float32 if is_mps() else torch.float64
     n, c = x.size(2), x.size(3) // 2
 
     # split freqs
@@ -49,7 +58,7 @@ def rope_apply(x, grid_sizes, freqs):
         seq_len = f * h * w
 
         # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
+        x_i = torch.view_as_complex(x[i, :seq_len].to(dtype).reshape(
             seq_len, n, -1, 2))
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
