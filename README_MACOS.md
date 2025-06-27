@@ -195,11 +195,6 @@ Both demos support seamless switching between:
 
 ## 📊 Benchmarks and Performance
 
-### Typical Performance on Apple Silicon
-- **M1 Pro (16GB)**: ~2-3 minutes for 7-block generation
-- **M2 Max (32GB+)**: ~1.5-2 minutes for 7-block generation
-- **M3 (16GB+)**: Similar to M2 with slight improvements
-
 ### Memory Usage Patterns
 - **Conservative Mode**: Uses ~60-70% of available unified memory
 - **Peak Usage**: Temporary spikes during VAE decoding
