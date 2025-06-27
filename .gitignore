@@ -34,3 +34,9 @@ videos/*
 
 # Logs
 *.log
+
+# macOS
+.DS_Store
+
+# Gradio
+gradio_tmp/
